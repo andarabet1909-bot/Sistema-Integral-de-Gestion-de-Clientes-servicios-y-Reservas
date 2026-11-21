@@ -11,6 +11,7 @@ import math
 import re
 import unicodedata
 import sys
+import tempfile
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
@@ -91,6 +92,11 @@ class Cliente(EntidadBase):
             raise ClienteInvalidoError("El nombre no puede estar vacío.")
         if len(valor.strip()) < 2:
             raise ClienteInvalidoError("El nombre debe contener al menos 2 caracteres.")
+        # CORRECCIÓN: solo letras (con tildes/ñ), espacios, apóstrofes y guiones.
+        if not re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:[ '\-][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*", valor.strip()):
+            raise ClienteInvalidoError(
+                f"El nombre '{valor}' solo puede contener letras y espacios."
+            )
         self._nombre = valor.strip()
 
     @property
@@ -359,7 +365,11 @@ class AlquilerEquipo(Servicio):
         )
 
     def describir_servicio(self):
-        return f"{self.tipo_equipo} (ID: {self.identificador}); tarifa por unidad y día."
+        # CORRECCIÓN: texto coherente con el resto (la duración puede ser horas o días).
+        return (
+            f"{self.tipo_equipo} (ID: {self.identificador}); "
+            "tarifa por unidad y por unidad de duración (hora/día)."
+        )
 
     def obtener_detalles(self) -> dict:
         """Devuelve los datos del servicio de alquiler de equipo."""
@@ -887,6 +897,11 @@ class VentanaPrincipal:
         ).pack(side="left", padx=5)
         ttk.Button(
             marco_simulacion,
+            text="Simulación completa (válidos e inválidos)",
+            command=self._ejecutar_simulacion_completa_interfaz
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            marco_simulacion,
             text="Limpiar resultados",
             command=self._limpiar_resultados_simulacion
         ).pack(side="left", padx=5)
@@ -959,6 +974,22 @@ class VentanaPrincipal:
             )
         except Exception as exc:
             logging.exception("Error al ejecutar la simulación desde la interfaz.")
+            self._agregar_resultado_simulacion(f"ERROR GENERAL: {exc}")
+            messagebox.showerror("Error de simulación", str(exc))
+
+    def _ejecutar_simulacion_completa_interfaz(self):
+        """CORRECCIÓN: lanza la simulación que crea datos temporales (no toca los reales)."""
+        self._limpiar_resultados_simulacion()
+        try:
+            ejecutar_simulacion_completa(
+                salida=self._agregar_resultado_simulacion, configurar=False
+            )
+            messagebox.showinfo(
+                "Simulación finalizada",
+                "La simulación completa terminó. Los datos reales no fueron modificados."
+            )
+        except Exception as exc:
+            logging.exception("Error al ejecutar la simulación completa.")
             self._agregar_resultado_simulacion(f"ERROR GENERAL: {exc}")
             messagebox.showerror("Error de simulación", str(exc))
 
@@ -1245,6 +1276,131 @@ def ejecutar_simulacion(gestor=None, salida=None, configurar=True):
     mostrar(f"Archivo de registros: {Path(__file__).resolve().parent / 'logs' / 'registro_eventos.log'}")
     logging.info("Revisión de 16 operaciones sobre datos reales finalizada.")
 
+def _simulacion_completa(salida=None, configurar=True):
+    """CORRECCIÓN: simulación de 15 operaciones que CREAN datos válidos e inválidos.
+
+    Usa su propio GestorSistema temporal, por lo que NO modifica los datos reales
+    de la aplicación. Cubre: clientes válidos/inválidos, servicios correctos e
+    incorrectos, y reservas exitosas y fallidas. El programa continúa siempre,
+    aunque cada escenario falle, y todo queda registrado en el log.
+    """
+    if configurar:
+        configurar_logging()
+    mostrar = salida if salida is not None else print
+    g = GestorSistema()
+    ctx = {}  # guarda objetos creados para usarlos en pasos posteriores
+
+    def cliente_valido():
+        ctx["ana"] = g.registrar_cliente(Cliente("C1", "Ana Pérez", "ana@correo.com", "3101234567"))
+        return ctx["ana"]
+
+    def cliente_correo_invalido():
+        return g.registrar_cliente(Cliente("C2", "Luis Mora", "luis-correo.com", "3009876543"))
+
+    def cliente_nombre_invalido():
+        return g.registrar_cliente(Cliente("C3", "12345", "num@correo.com", "3001112222"))
+
+    def cliente_telefono_invalido():
+        return g.registrar_cliente(Cliente("C4", "Marta Ruiz", "marta@correo.com", "abc"))
+
+    def cliente_duplicado():
+        return g.registrar_cliente(Cliente("c1", "Ana Duplicada", "otra@correo.com", "3101234567"))
+
+    def servicio_sala_valido():
+        ctx["sala"] = g.registrar_servicio(ReservaSala("S1", 50000, 10))
+        return ctx["sala"].describir_servicio()
+
+    def servicio_sala_invalido():
+        return g.registrar_servicio(ReservaSala("S2", 50000, -4))
+
+    def servicio_abstracto():
+        try:
+            return g.registrar_servicio(Servicio("S3", "Genérico", 1000))
+        except TypeError as exc:  # encadenamiento: TypeError -> excepción del dominio
+            raise ServicioInvalidoError(
+                "Servicio es una clase abstracta y no puede instanciarse directamente."
+            ) from exc
+
+    def servicio_equipo_y_asesoria():
+        ctx["equipo"] = g.registrar_servicio(AlquilerEquipo("S4", 20000, "Portátil"))
+        ctx["asesoria"] = g.registrar_servicio(AsesoriaEspecializada("S5", 90000, "Arquitectura"))
+        return f"{ctx['equipo'].describir_servicio()} | {ctx['asesoria'].describir_servicio()}"
+
+    def sobrecarga_costos():
+        s = ctx["asesoria"]
+        return (
+            f"base+IVA={s.calcular_costo(2, nivel='Avanzado')} | "
+            f"con descuento={s.calcular_costo_con_descuento(2, 10000, nivel='Avanzado')} | "
+            f"sin IVA={s.calcular_costo_sin_impuesto(2, nivel='Avanzado')}"
+        )
+
+    def reserva_valida():
+        r = Reserva("R1", ctx["ana"], ctx["sala"], 3, {"personas": 5})
+        g.crear_reserva(r)
+        ctx["r1"] = r
+        return f"Creada ({r.estado.value}); total al confirmar: {r.confirmar()}"
+
+    def reserva_sala_excede_capacidad():
+        r = Reserva("R2", ctx["ana"], ctx["sala"], 2, {"personas": 50})
+        g.crear_reserva(r)
+        return r.confirmar()  # falla: la sala admite 10 personas
+
+    def reserva_duracion_invalida():
+        r = Reserva("R3", ctx["ana"], ctx["equipo"], -3, {"unidades": 2})
+        g.crear_reserva(r)
+        return r.confirmar()  # falla: duración negativa (excepción encadenada)
+
+    def reserva_cliente_no_registrado():
+        intruso = Cliente("C9", "Pedro Gil", "pedro@correo.com", "3201234567")
+        return g.crear_reserva(Reserva("R4", intruso, ctx["sala"], 1, {"personas": 2}))
+
+    def cancelar_dos_veces():
+        ctx["r1"].cancelar()
+        ctx["r1"].cancelar()  # falla: ya está cancelada
+
+    escenarios = [
+        ("1. Cliente válido", cliente_valido),
+        ("2. Cliente con correo inválido", cliente_correo_invalido),
+        ("3. Cliente con nombre inválido (solo números)", cliente_nombre_invalido),
+        ("4. Cliente con teléfono inválido", cliente_telefono_invalido),
+        ("5. Cliente duplicado", cliente_duplicado),
+        ("6. Servicio válido: sala", servicio_sala_valido),
+        ("7. Servicio inválido: sala con capacidad negativa", servicio_sala_invalido),
+        ("8. Servicio inválido: instanciar clase abstracta", servicio_abstracto),
+        ("9. Servicios válidos: equipo y asesoría", servicio_equipo_y_asesoria),
+        ("10. Sobrecarga de calcular_costo", sobrecarga_costos),
+        ("11. Reserva válida creada y confirmada", reserva_valida),
+        ("12. Reserva fallida: sala excede capacidad", reserva_sala_excede_capacidad),
+        ("13. Reserva fallida: duración negativa", reserva_duracion_invalida),
+        ("14. Reserva fallida: cliente no registrado", reserva_cliente_no_registrado),
+        ("15. Cancelar una reserva dos veces", cancelar_dos_veces),
+    ]
+
+    mostrar("=" * 72)
+    mostrar("SIMULACIÓN COMPLETA - OPERACIONES VÁLIDAS E INVÁLIDAS (datos temporales)")
+    mostrar("=" * 72)
+    for etiqueta, funcion in escenarios:
+        intentar(etiqueta, funcion, mostrar)
+    mostrar(
+        f"\nRESUMEN: {len(g.clientes)} clientes, {len(g.servicios)} servicios, "
+        f"{len(g.reservas)} reservas en el gestor temporal."
+    )
+    mostrar("El programa continuó ejecutándose a pesar de los errores controlados.")
+    logging.info("Simulación completa finalizada.")
+
+def ejecutar_simulacion_completa(salida=None, configurar=True):
+    """Ejecuta la simulación usando un archivo temporal para NO tocar los datos guardados."""
+    global _ARCHIVO_DATOS
+    real = _ARCHIVO_DATOS
+    demo = Path(tempfile.gettempdir()) / "software_fj_demo.pkl"
+    demo.unlink(missing_ok=True)
+    _ARCHIVO_DATOS = demo
+    try:
+        _simulacion_completa(salida, configurar)
+    finally:
+        _ARCHIVO_DATOS = real
+        demo.unlink(missing_ok=True)
+
 # ============================================================================
 # Inicio de la aplicación
 # ============================================================================
@@ -1264,7 +1420,7 @@ def iniciar_interfaz():
             "Error inesperado",
             "No fue posible iniciar la aplicación. Revise logs/registro_eventos.log."
         )
-============================================================================
+# ============================================================================
 
 import pickle
 from tkinter import simpledialog
@@ -1825,8 +1981,10 @@ def _ventana_init_revision_final(self, root, gestor):
 VentanaPrincipal.__init__ = _ventana_init_revision_final
 
 if __name__ == "__main__":
-    if "--simular" in sys.argv:
+    if "--demo" in sys.argv:
+        ejecutar_simulacion_completa()
+    elif "--simular" in sys.argv:
         ejecutar_simulacion()
     else:
         iniciar_interfaz()
-# aporte al trabajo 
+# aporte al trabajo
